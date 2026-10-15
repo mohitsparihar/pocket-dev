@@ -189,11 +189,14 @@ class CompanionClient(
 
     fun gitDiff(projectId: String, path: String, base: String, commit: String): String {
         val q = "/v1/git/diff?projectId=$projectId&path=${encode(path)}&base=$base${if (commit.isNotBlank()) "&commit=${encode(commit)}" else ""}"
-        return get(q).use { it.body?.string() ?: "" }
+        return get(q).use { parseBody<RemoteDiff>(it).diff }
     }
 
     fun branches(projectId: String): List<RemoteBranchInfo> =
-        get("/v1/git/branches?projectId=$projectId").use { parseBody(it) }
+        get("/v1/git/branches?projectId=$projectId").use { parseBody<RemoteBranchList>(it).branches }
+
+    fun gitLog(projectId: String, limit: Int): List<RemoteCommit> =
+        get("/v1/git/log?projectId=$projectId&limit=$limit").use { parseBody(it) }
 
     fun commit(req: CommitRequest, idempotencyKey: String): RemoteGitResult =
         post("/v1/git/commit", req, idempotencyKey = idempotencyKey).use { parseBody(it) }

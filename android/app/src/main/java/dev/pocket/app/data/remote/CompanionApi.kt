@@ -223,8 +223,8 @@ data class DeleteRequest(val projectId: String, val paths: List<String>)
 
 @Serializable
 data class RemoteGitStatus(
-    val branch: String,
-    val files: List<RemoteGitFile>,
+    val branch: String = "",
+    val files: List<RemoteGitFile> = emptyList(),
     val ahead: Int = 0,
     val behind: Int = 0,
 )
@@ -233,7 +233,22 @@ data class RemoteGitStatus(
 data class RemoteGitFile(val path: String, val status: String, val staged: Boolean = false)
 
 @Serializable
-data class RemoteBranchInfo(val name: String, val current: Boolean)
+data class RemoteBranchInfo(val name: String, val current: Boolean = false, val remote: Boolean = false)
+
+@Serializable
+data class RemoteBranchList(val branches: List<RemoteBranchInfo> = emptyList())
+
+@Serializable
+data class RemoteDiff(val diff: String = "")
+
+@Serializable
+data class RemoteCommit(
+    val sha: String = "",
+    val shortSha: String = "",
+    val author: String = "",
+    val at: Long = 0L,
+    val subject: String = "",
+)
 
 @Serializable
 data class CommitRequest(val projectId: String, val paths: List<String>, val message: String)
@@ -242,7 +257,7 @@ data class CommitRequest(val projectId: String, val paths: List<String>, val mes
 data class PushPullRequest(val projectId: String)
 
 @Serializable
-data class RemoteGitResult(val ok: Boolean, val message: String)
+data class RemoteGitResult(val ok: Boolean = false, val message: String = "")
 
 @Serializable
 data class RemoteProcess(

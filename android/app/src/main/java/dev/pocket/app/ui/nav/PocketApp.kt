@@ -129,9 +129,10 @@ fun PocketApp(
                     repository = repository,
                     sessionId = id,
                     onBack = { nav.popBackStack() },
-                    onOpenTerminal = { nav.navigate(Routes.terminal(it)) },
-                    onOpenChanges = { nav.navigate(Routes.changes(it)) },
-                    onOpenFile = { projectId, path -> nav.navigate(Routes.editor(projectId, path)) },
+                    // A blank project id makes a route like project//changes, which doesn't exist and would crash.
+                    onOpenTerminal = { if (it.isNotBlank()) nav.navigate(Routes.terminal(it)) },
+                    onOpenChanges = { if (it.isNotBlank()) nav.navigate(Routes.changes(it)) },
+                    onOpenFile = { projectId, path -> if (projectId.isNotBlank()) nav.navigate(Routes.editor(projectId, path)) },
                 )
             }
             composable(Routes.Projects) {

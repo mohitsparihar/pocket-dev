@@ -1,0 +1,25 @@
+{
+  "name": "pocket-dev",
+  "private": true,
+  "description": "Pocket Dev: Android app plus the VPS companion",
+  "scripts": {
+    "apk": "node scripts/android.mjs build",
+    "phone": "node scripts/android.mjs install",
+    "phone:install": "node scripts/android.mjs install-only",
+    "phone:launch": "node scripts/android.mjs launch",
+    "phone:logs": "node scripts/android.mjs logs",
+    "phone:crashes": "node scripts/android.mjs crashes",
+    "phone:uninstall": "node scripts/android.mjs uninstall",
+    "devices": "node scripts/android.mjs devices",
+    "test": "npm run test:companion && npm run test:android",
+    "test:android": "cd android && ./gradlew testDebugUnitTest",
+    "test:companion": "cd companion && npm test",
+    "companion:install": "cd companion && npm install",
+    "companion:build": "cd companion && npm run build",
+    "companion:start": "cd companion && npm start",
+    "clean": "cd android && ./gradlew clean && cd .. && rm -rf dist companion/dist"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

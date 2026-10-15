@@ -28,6 +28,7 @@ import dev.pocket.app.model.EditorBuffer
 import dev.pocket.app.model.FileEntry
 import dev.pocket.app.model.GitFile
 import dev.pocket.app.model.GitOperationResult
+import dev.pocket.app.model.GitCommit
 import dev.pocket.app.model.GitStatus
 import dev.pocket.app.model.LinkState
 import dev.pocket.app.model.PendingPrompt
@@ -129,24 +130,25 @@ class RemotePocketRepository(
     @Volatile private var desiredConnectionId: String? = null
     private var supervisorJob: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
+
+    // Survives the app being killed: prompts not yet confirmed by the VM, and
+    // how far this phone has read the event stream.
+    private val outboxFile = profileFile?.resolveSibling("outbox.json")
+    private val cursorFile = profileFile?.resolveSibling("event-cursor.json")
+    private val outboxLock = Any()
+    private var savedCursor: SavedCursor? = null
+    private var cursorSavedAt = 0L
+    @Volatile private var connectGeneration = 0
     private var activeTunnel: IapTunnel? = null
     private val profileJson = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
     // ── Credential helpers ────────────────────────────────────────────────────
 
     init {
-        val saved = loadSavedProfiles().toMutableList()
-        val marker = profileFile?.resolveSibling("default-connection-seeded")
-        if (marker?.exists() != true) {
-            if (saved.none { it.id == SEEDED_ID || it.instance == "redacted-instance" }) {
-                saved += defaultSeededProfile()
-            }
-            _connections.value = saved
-            persistProfiles()
-            runCatching { marker?.writeText("1") }
-        } else if (saved.isNotEmpty()) {
-            _connections.value = saved
-        }
+        val saved = loadSavedProfiles()
+        if (saved.isNotEmpty()) _connections.value = saved
+        loadOutbox()
+        savedCursor = runCatching { profileJson.decodeFromString<SavedCursor>(cursorFile!!.readText()) }.getOrNull()
         scope.launch {
             val seededConnections = delegate.connections().first()
             val demos = seededConnections.filter { it.kind == ConnectionKind.Demo }
@@ -224,9 +226,13 @@ class RemotePocketRepository(
         }
     }
 
-    override suspend fun connect(id: String): ConnectResult = connectMutex.withLock { connectLocked(id) }
+    override suspend fun connect(id: String): ConnectResult {
+        // Taken before waiting for the lock, so a Disconnect tapped meanwhile also cancels this attempt.
+        val generation = connectGeneration
+        return connectMutex.withLock { connectLocked(id, generation) }
+    }
 
-    private suspend fun connectLocked(id: String): ConnectResult = withContext(Dispatchers.IO) {
+    private suspend fun connectLocked(id: String, generation: Int): ConnectResult = withContext(Dispatchers.IO) {
         val profile = _connections.value.find { it.id == id }
             ?: return@withContext ConnectResult(false, "Connection not found", "Add it again.")
         loadStoredKey(id)
@@ -320,16 +326,32 @@ class RemotePocketRepository(
         }
 
         resetEventCursor(id, c)
+        if (generation != connectGeneration) return@withContext abandonConnect(id)
         client = c
         pollFailures = 0
         _activeConnectionId.value = id
         _link.value = LinkState.Live
         updatePhase(id, ConnectionPhase.Connected, "Connected to ${endpoint.host}")
+        // Disconnect may have run while the line above was committing; undo if so.
+        if (generation != connectGeneration) return@withContext abandonConnect(id)
         startEventStream(c)
         startPolling(profile)
         scope.launch { flushOutbox() }
 
         ConnectResult(true, "Connected to ${endpoint.host}")
+    }
+
+    /** Disconnect was tapped while this attempt was still setting up. */
+    private fun abandonConnect(id: String): ConnectResult {
+        pollJob?.cancel()
+        closeEventStream()
+        client = null
+        _activeConnectionId.value = null
+        _link.value = LinkState.Offline
+        sshManager.disconnect()
+        closeTunnel()
+        updatePhase(id, ConnectionPhase.Disconnected, "Disconnected")
+        return ConnectResult(false, "Disconnected")
     }
 
     private fun prepareGoogle(profile: ConnectionProfile): GoogleReady {
@@ -408,20 +430,6 @@ class RemotePocketRepository(
         activeTunnel = null
     }
 
-    private fun defaultSeededProfile() = ConnectionProfile(
-        id = SEEDED_ID,
-        name = "seeded-server",
-        kind = ConnectionKind.GoogleCloud,
-        host = "redacted-instance",
-        port = 22,
-        username = "redacted-user",
-        project = "redacted-project",
-        zone = "asia-south1-b",
-        instance = "redacted-instance",
-        companionPort = 8787,
-        setupCode = "REDACTED-setup-code",
-    )
-
     private fun loadSavedProfiles(): List<ConnectionProfile> {
         val file = profileFile ?: return emptyList()
         if (!file.exists()) return emptyList()
@@ -445,8 +453,13 @@ class RemotePocketRepository(
 
     private data class GoogleReady(val profile: ConnectionProfile, val factory: SocketFactory)
 
+    @kotlinx.serialization.Serializable
+    private data class SavedCursor(val connectionId: String, val seq: Long)
+
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
+        connectGeneration++
         desiredConnectionId = null
+        synchronized(eventLock) { saveCursor(force = true) }
         supervisorJob?.cancel()
         pollJob?.cancel()
         closeEventStream()
@@ -589,8 +602,16 @@ class RemotePocketRepository(
         )
     }
 
+    override suspend fun resendPending(key: String) {
+        val old = _outbox.value.find { it.key == key } ?: return
+        // A new key: the old one is spent on the VM.
+        val fresh = old.copy(key = UUID.randomUUID().toString(), state = PendingState.Sending, createdAt = System.currentTimeMillis())
+        updateOutbox { list -> list.map { if (it.key == key) fresh else it } }
+        deliver(fresh.key)
+    }
+
     override suspend fun discardPending(key: String) {
-        _outbox.update { list -> list.filter { it.key != key } }
+        updateOutbox { list -> list.filter { it.key != key } }
     }
 
     override fun approvals(sessionId: String): Flow<List<ApprovalRequest>> =
@@ -639,7 +660,7 @@ class RemotePocketRepository(
      */
     override suspend fun prompt(sessionId: String, text: String, idempotencyKey: String) {
         if (client == null) return delegate.prompt(sessionId, text, idempotencyKey)
-        _outbox.update { list ->
+        updateOutbox { list ->
             list.filter { it.key != idempotencyKey } +
                 PendingPrompt(idempotencyKey, sessionId, text, PendingState.Sending, System.currentTimeMillis())
         }
@@ -666,22 +687,56 @@ class RemotePocketRepository(
                 "NETWORK" -> setPending(key, PendingState.Waiting)
                 // Cursor and Codex take one prompt at a time; send it when the agent finishes.
                 "BUSY" -> setPending(key, PendingState.Queued)
+                // The VM recorded it but it never reached the agent; let the user resend.
+                "NOT_DELIVERED" -> setPending(key, PendingState.Failed)
                 else -> {
-                    _outbox.update { list -> list.filter { it.key != key } }
+                    updateOutbox { list -> list.filter { it.key != key } }
                     throw e
                 }
             }
         }
     }
 
+    /** Every outbox change is written to disk before anything is sent. */
+    private fun updateOutbox(change: (List<PendingPrompt>) -> List<PendingPrompt>) {
+        synchronized(outboxLock) {
+            _outbox.update(change)
+            val file = outboxFile ?: return
+            val json = profileJson.encodeToString(_outbox.value)
+            // Write a temp file and swap it in, so a crash mid-write never leaves a half file.
+            runCatching {
+                val tmp = file.resolveSibling("${file.name}.tmp")
+                tmp.writeText(json)
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                )
+            }.recoverCatching { file.writeText(json) }
+                .onFailure { android.util.Log.w("PocketDev", "Could not save the outbox", it) }
+        }
+    }
+
+    private fun loadOutbox() {
+        val file = outboxFile ?: return
+        val saved = runCatching { profileJson.decodeFromString<List<PendingPrompt>>(file.readText()) }.getOrNull() ?: return
+        // Whether these reached the VM is unknown; retrying with the same key is safe,
+        // as long as the VM still remembers the key. Very old ones need a decision.
+        val cutoff = System.currentTimeMillis() - PENDING_MAX_AGE_MS
+        _outbox.value = saved.map {
+            it.copy(state = if (it.state == PendingState.Failed || it.createdAt < cutoff) PendingState.Failed else PendingState.Waiting)
+        }
+    }
+
     private fun setPending(key: String, state: PendingState) {
-        _outbox.update { list -> list.map { if (it.key == key) it.copy(state = state) else it } }
+        updateOutbox { list -> list.map { if (it.key == key) it.copy(state = state) else it } }
     }
 
     private suspend fun flushOutbox() {
         val now = System.currentTimeMillis()
         // A sent prompt is normally removed when its event arrives; this covers a missed event.
-        _outbox.update { list -> list.filter { it.state != PendingState.Sent || now - it.createdAt < SENT_TTL_MS } }
+        updateOutbox { list -> list.filter { it.state != PendingState.Sent || now - it.createdAt < SENT_TTL_MS } }
         for (pending in _outbox.value) {
             if (pending.state == PendingState.Waiting || pending.state == PendingState.Queued) {
                 runCatching { deliver(pending.key) }
@@ -894,9 +949,14 @@ class RemotePocketRepository(
             c.gitDiff(projectId, path, base.name.lowercase(), commit)
         }
 
+    override suspend fun gitLog(projectId: String): List<GitCommit> = withContext(Dispatchers.IO) {
+        val c = client ?: return@withContext delegate.gitLog(projectId)
+        c.gitLog(projectId, 30).map { GitCommit(it.sha, it.shortSha, it.author, it.at, it.subject) }
+    }
+
     override suspend fun branches(projectId: String): List<BranchInfo> = withContext(Dispatchers.IO) {
         val c = client ?: return@withContext delegate.branches(projectId)
-        c.branches(projectId).map { BranchInfo(it.name, it.current) }
+        c.branches(projectId).map { BranchInfo(it.name, it.current, it.remote) }
     }
 
     override suspend fun commit(
@@ -1116,6 +1176,14 @@ class RemotePocketRepository(
         val head = runCatching { c.healthInfo().latestSeq }.getOrNull() ?: return
         synchronized(eventLock) {
             if (seqConnectionId == connectionId && head >= lastEventSeq) return
+            // After the app was killed, carry on from where it stopped reading so
+            // everything that happened meanwhile is replayed.
+            val saved = savedCursor
+            if (seqConnectionId == null && saved?.connectionId == connectionId && saved.seq <= head) {
+                seqConnectionId = connectionId
+                lastEventSeq = saved.seq
+                return
+            }
             seqConnectionId = connectionId
             lastEventSeq = head
             _events.value = emptyMap()
@@ -1139,7 +1207,10 @@ class RemotePocketRepository(
         if (stored.isEmpty()) return
         synchronized(eventLock) {
             val fresh = if (live) stored.filter { it.seq > lastEventSeq } else emptyList()
-            if (fresh.isNotEmpty()) lastEventSeq = fresh.maxOf { it.seq }
+            if (fresh.isNotEmpty()) {
+                lastEventSeq = fresh.maxOf { it.seq }
+                saveCursor(force = false)
+            }
             val mapped = stored.mapNotNull { event ->
                 val text = readableEventText(event.payload)
                 if (event.type == "output" && text.isBlank()) null
@@ -1157,13 +1228,26 @@ class RemotePocketRepository(
         }
     }
 
+    private fun saveCursor(force: Boolean) {
+        val id = seqConnectionId ?: return
+        val now = System.currentTimeMillis()
+        if (!force && now - cursorSavedAt < CURSOR_SAVE_INTERVAL_MS) return
+        cursorSavedAt = now
+        val cursor = SavedCursor(id, lastEventSeq)
+        savedCursor = cursor
+        runCatching { cursorFile?.writeText(profileJson.encodeToString(cursor)) }
+    }
+
     private fun applyLiveEvent(event: RemoteEvent) {
         when (event.type) {
             "assistant" -> _streaming.update { it - event.sessionId }
             "prompt" -> {
+                val key = ((event.payload as? JsonObject)?.get("key") as? JsonPrimitive)?.contentOrNull
                 val text = readableEventText(event.payload)
-                _outbox.update { list ->
-                    val match = list.firstOrNull { it.sessionId == event.sessionId && it.text.trim() == text }
+                updateOutbox { list ->
+                    // Older companions don't echo the key; fall back to the text.
+                    val match = if (key != null) list.firstOrNull { it.key == key }
+                    else list.firstOrNull { it.sessionId == event.sessionId && it.text.trim() == text }
                     if (match == null) list else list - match
                 }
             }
@@ -1192,6 +1276,8 @@ class RemotePocketRepository(
         if (supervisorJob?.isActive == true) return
         supervisorJob = scope.launch { supervise() }
     }
+
+    fun isKeepingAlive(id: String): Boolean = desiredConnectionId == id && supervisorJob?.isActive == true
 
     /** Called when Android reports a usable network, to retry right away. */
     fun nudge() {
@@ -1356,7 +1442,8 @@ class RemotePocketRepository(
 
     private fun RemoteGitStatus.toModel() = GitStatus(
         branch = branch,
-        files = files.map { GitFile(it.path, it.status, it.staged) },
+        // Lists key rows by path, and duplicate keys crash them.
+        files = files.distinctBy { it.path }.map { GitFile(it.path, it.status, it.staged) },
         ahead = ahead,
         behind = behind,
     )
@@ -1407,9 +1494,10 @@ class RemotePocketRepository(
         private const val BACKOFF_MAX_MS = 30_000L
         private const val SENT_TTL_MS = 20_000L
         private const val STREAM_OPEN_TIMEOUT_MS = 8_000L
+        private const val CURSOR_SAVE_INTERVAL_MS = 2_000L
+        private const val PENDING_MAX_AGE_MS = 25L * 24 * 3600 * 1000
         private const val HISTORY_LIMIT = 400
         private const val MAX_EVENTS_PER_SESSION = 1_500
-        private const val SEEDED_ID = "seeded-server"
 
         fun isNonRetryable(message: String): Boolean =
             message.startsWith("Unknown host key") ||

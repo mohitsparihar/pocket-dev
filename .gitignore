@@ -16,3 +16,6 @@ companion/*.db-*
 docs/reports/*.log
 *.log
 .agents/logs/
+
+# Built APKs copied by npm run apk
+dist/

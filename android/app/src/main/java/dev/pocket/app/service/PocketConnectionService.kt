@@ -213,6 +213,19 @@ class PocketConnectionService : Service() {
 
         val sshManager = SshSessionManager(HostKeyStore())
 
+        /**
+         * Reconnects to the VM the user was connected to when the app was
+         * killed, so saved prompts go out and missed events replay.
+         */
+        fun resumeIfConnected(context: Context) {
+            val id = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CONNECTION_ID, null) ?: return
+            if (repository?.isKeepingAlive(id) == true) return
+            val intent = Intent(context, PocketConnectionService::class.java)
+                .setAction(ACTION_CONNECT)
+                .putExtra(EXTRA_CONNECTION_ID, id)
+            runCatching { androidx.core.content.ContextCompat.startForegroundService(context, intent) }
+        }
+
         /** Set by RepositoryFactory before the service is started. */
         @Volatile
         var repository: RemotePocketRepository? = null

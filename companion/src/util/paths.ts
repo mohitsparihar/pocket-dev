@@ -17,36 +17,54 @@ export function safePath(projectRoot: string, userPath: string): string {
     throwHttp(400, 'PATH_ESCAPE', 'Path escapes project root');
   }
 
-  // Check for symlinks that escape (resolve both sides to handle /tmp → /private/tmp on macOS)
+  // Resolve the deepest part of the path that exists, so a symlinked parent
+  // folder (project/link/file with link -> /etc) can't lead outside the root.
+  // Resolving both sides also handles /tmp -> /private/tmp on macOS.
+  const realRoot = realpathOr(projectRoot);
+  let existing = resolved;
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      fs.lstatSync(existing);
+      break;
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  let real: string;
   try {
-    const stat = fs.lstatSync(resolved);
-    if (stat.isSymbolicLink()) {
-      let real: string;
-      try {
-        real = fs.realpathSync(resolved);
-      } catch {
-        throwHttp(400, 'PATH_ESCAPE', 'Cannot resolve symlink target');
-      }
-      let realRoot: string;
-      try {
-        realRoot = fs.realpathSync(projectRoot);
-      } catch {
-        realRoot = projectRoot;
-      }
-      const realRootSep = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
-      if (real !== realRoot && !real.startsWith(realRootSep)) {
-        throwHttp(400, 'PATH_ESCAPE', 'Symlink target escapes project root');
-      }
-    }
-  } catch (e: unknown) {
-    if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-      // File doesn't exist yet — allowed for write operations
-      return resolved;
-    }
-    throw e;
+    real = fs.realpathSync(existing);
+  } catch {
+    throwHttp(400, 'PATH_ESCAPE', 'Cannot resolve symlink target');
+  }
+  if (!isInside(realRoot, path.join(real, ...rest))) {
+    throwHttp(400, 'PATH_ESCAPE', 'Path escapes project root');
   }
 
   return resolved;
+}
+
+function realpathOr(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return candidate === root || candidate.startsWith(rootWithSep);
+}
+
+/** Deleting, moving or renaming the project folder itself is never what the phone meant. */
+export function assertNotRoot(projectRoot: string, resolved: string): void {
+  if (path.resolve(resolved) === path.resolve(projectRoot) || realpathOr(resolved) === realpathOr(projectRoot)) {
+    throwHttp(400, 'VALIDATION', 'The project folder itself cannot be changed this way');
+  }
 }
 
 export function assertInsideRoot(projectRoot: string, resolved: string): void {

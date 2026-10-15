@@ -5,7 +5,7 @@ import { verifyToken } from '../auth.js';
 import { getDb } from '../db.js';
 import { readBody, parseBody } from '../util/idempotency.js';
 import { throwHttp } from '../util/errors.js';
-import { safePath } from '../util/paths.js';
+import { assertNotRoot, safePath } from '../util/paths.js';
 import { fingerprintFile, fingerprintBuffer, isBinaryBuffer, MAX_TEXT_SIZE } from '../util/fingerprint.js';
 
 interface ProjectRow { id: string; root_path: string; }
@@ -178,6 +178,7 @@ export function registerFileRoutes(): void {
 
     const project = requireProject(body.projectId);
     const absPath = safePath(project.root_path, body.path);
+    assertNotRoot(project.root_path, absPath);
     const newPath = safePath(project.root_path, path.join(path.dirname(body.path), body.newName));
 
     if (!fs.existsSync(absPath)) throwHttp(404, 'NOT_FOUND', 'Path not found');
@@ -196,6 +197,7 @@ export function registerFileRoutes(): void {
     const project = requireProject(body.projectId);
     const absPath = safePath(project.root_path, body.path);
     const destPath = safePath(project.root_path, body.destination);
+    assertNotRoot(project.root_path, absPath);
 
     if (!fs.existsSync(absPath)) throwHttp(404, 'NOT_FOUND', 'Path not found');
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -214,6 +216,7 @@ export function registerFileRoutes(): void {
     const project = requireProject(body.projectId);
     const absPath = safePath(project.root_path, body.path);
     const destPath = safePath(project.root_path, body.destination);
+    assertNotRoot(project.root_path, absPath);
 
     if (!fs.existsSync(absPath)) throwHttp(404, 'NOT_FOUND', 'Path not found');
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -230,8 +233,10 @@ export function registerFileRoutes(): void {
     }
 
     const project = requireProject(body.projectId);
-    for (const p of body.paths) {
-      const absPath = safePath(project.root_path, p);
+    // Check every path before deleting any, so one bad path deletes nothing.
+    const targets = body.paths.map((p) => safePath(project.root_path, p));
+    for (const absPath of targets) assertNotRoot(project.root_path, absPath);
+    for (const absPath of targets) {
       if (fs.existsSync(absPath)) {
         fs.rmSync(absPath, { recursive: true, force: true });
       }

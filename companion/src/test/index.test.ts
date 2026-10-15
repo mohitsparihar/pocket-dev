@@ -564,3 +564,157 @@ describe('Status details', () => {
     assert.deepEqual(event.usage, { inputTokens: 900, outputTokens: 40 });
   });
 });
+
+// ─── Real path guard, root guard, orphaned agents ───────────────────────────
+
+import { safePath as realSafePath, assertNotRoot } from '../util/paths.js';
+import { looksLikeOurAgent, stopOrphan } from '../providers/orphans.js';
+import { spawn } from 'node:child_process';
+
+describe('Project path guard', () => {
+  let root: string;
+  let outside: string;
+
+  before(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-root-')));
+    outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-outside-')));
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'x');
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.symlinkSync(outside, path.join(root, 'link'));
+    fs.symlinkSync(path.join(root, 'src'), path.join(root, 'inner-link'));
+  });
+
+  const code = (fn: () => unknown) => {
+    try {
+      fn();
+      return 'ok';
+    } catch (e) {
+      return (e as { body?: { error?: { code?: string } } }).body?.error?.code ?? String(e);
+    }
+  };
+
+  test('a symlinked parent folder cannot lead outside the project', () => {
+    assert.equal(code(() => realSafePath(root, 'link/secret.txt')), 'PATH_ESCAPE');
+    assert.equal(code(() => realSafePath(root, 'link/new-file.txt')), 'PATH_ESCAPE');
+    assert.equal(code(() => realSafePath(root, 'link')), 'PATH_ESCAPE');
+  });
+
+  test('normal paths and links inside the project still work', () => {
+    assert.equal(code(() => realSafePath(root, 'src/new/file.ts')), 'ok');
+    assert.equal(code(() => realSafePath(root, 'inner-link/file.ts')), 'ok');
+    assert.equal(code(() => realSafePath(root, '../escape')), 'PATH_ESCAPE');
+  });
+
+  test('the project folder itself cannot be deleted, moved or renamed', () => {
+    assert.equal(code(() => assertNotRoot(root, realSafePath(root, '.'))), 'VALIDATION');
+    assert.equal(code(() => assertNotRoot(root, realSafePath(root, 'src/..'))), 'VALIDATION');
+    assert.equal(code(() => assertNotRoot(root, realSafePath(root, 'src'))), 'ok');
+  });
+});
+
+describe('Orphaned agents', () => {
+  test('only our own detached agents match', () => {
+    assert.ok(looksLikeOurAgent('4242 claude -p --input-format stream-json --verbose', 4242));
+    assert.ok(looksLikeOurAgent('4242 codex exec --json --color never', 4242));
+    // Same flags, but not a group leader: not ours.
+    assert.ok(!looksLikeOurAgent('100 claude -p --output-format stream-json', 4242));
+    // A group leader without our flags, e.g. a reused pid.
+    assert.ok(!looksLikeOurAgent('4242 /usr/bin/postgres -D /var/lib', 4242));
+  });
+
+  const sleeper = (marker: string) => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', marker], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    return child.pid!;
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  test('a leftover agent is stopped and an unrelated process is not', async () => {
+    const ours = sleeper('--output-format=stream-json');
+    const theirs = sleeper('--something-else');
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      assert.equal(stopOrphan(ours), true);
+      assert.equal(stopOrphan(theirs), false);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(alive(ours), false);
+      assert.equal(alive(theirs), true);
+    } finally {
+      for (const pid of [ours, theirs]) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+      }
+    }
+  });
+});
+
+describe('Orphan ownership', () => {
+  test('a recorded start time that does not match is never stopped', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', '--output-format=stream-json'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    const pid = child.pid!;
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      const { processStart } = await import('../providers/orphans.js');
+      const started = processStart(pid);
+      assert.ok(started);
+      // Same pid, but a different process from the one we recorded.
+      assert.equal(stopOrphan(pid, 'Thu Jan  1 00:00:00 1970'), false);
+      assert.equal(stopOrphan(pid, started), true);
+    } finally {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    }
+  });
+});
+
+import { parseStatus } from '../handlers/git.js';
+
+describe('Git status for the phone', () => {
+  test('branch, ahead/behind and one entry per path', () => {
+    const out = [
+      '## main...origin/main [ahead 2, behind 1]',
+      'MM src/app.ts', // staged and modified again: one row, not two
+      'A  new.ts',
+      ' D old.ts',
+      'R  renamed.ts',
+      'was-named.ts',
+      '?? notes with space.md',
+      'UU conflict.ts',
+      '',
+    ].join('\0');
+    assert.deepEqual(parseStatus(out), {
+      branch: 'main',
+      ahead: 2,
+      behind: 1,
+      files: [
+        { path: 'src/app.ts', status: 'modified', staged: true },
+        { path: 'new.ts', status: 'added', staged: true },
+        { path: 'old.ts', status: 'deleted', staged: false },
+        { path: 'renamed.ts', status: 'renamed', staged: true },
+        { path: 'notes with space.md', status: 'untracked', staged: false },
+        { path: 'conflict.ts', status: 'conflict', staged: true },
+      ],
+    });
+  });
+
+  test('a repository without commits', () => {
+    assert.deepEqual(parseStatus('## No commits yet on main\0?? a.txt\0'), {
+      branch: 'main',
+      ahead: 0,
+      behind: 0,
+      files: [{ path: 'a.txt', status: 'untracked', staged: false }],
+    });
+  });
+});

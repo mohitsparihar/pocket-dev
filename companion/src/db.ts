@@ -149,6 +149,16 @@ export function initDb(): DatabaseSync {
     )
   `);
 
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS prompt_ops (
+      ikey TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `);
+
   _db.exec(`CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events (session_id, seq)`);
 
   addColumn('sessions', 'model', 'TEXT');
@@ -157,6 +167,7 @@ export function initDb(): DatabaseSync {
   addColumn('sessions', 'slash_commands', 'TEXT');
   addColumn('sessions', 'provider_info', 'TEXT');
   addColumn('sessions', 'usage', 'TEXT');
+  addColumn('sessions', 'process_started', 'TEXT');
 
   // Recover global seq counter
   const row = _db.prepare('SELECT MAX(seq) as max_seq FROM session_events').get() as { max_seq: number | null };

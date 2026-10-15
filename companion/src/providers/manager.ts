@@ -4,6 +4,7 @@ import { getCapabilities } from './detect.js';
 import { cursorModelId, eventsFromProviderLine, TurnUsage } from './streamEvents.js';
 import { emitEvent, emitDelta, broadcastPtyOutput } from '../ws/broadcast.js';
 import { throwHttp } from '../util/errors.js';
+import { processStart } from './orphans.js';
 
 export interface SessionLaunch {
   model?: string;
@@ -86,7 +87,14 @@ function updateSessionState(sessionId: string, state: string): void {
 
 function updateSessionPid(sessionId: string, pid: number | undefined): void {
   const db = getDb();
-  db.prepare('UPDATE sessions SET process_pid = ?, updated_at = ? WHERE id = ?').run(pid ?? null, now(), sessionId);
+  // The start time lets a restarted companion tell this process from one that reused its pid.
+  const started = pid ? processStart(pid) : null;
+  db.prepare('UPDATE sessions SET process_pid = ?, process_started = ?, updated_at = ? WHERE id = ?').run(
+    pid ?? null,
+    started,
+    now(),
+    sessionId
+  );
 }
 
 function claudeModeArgs(mode: string): string[] {

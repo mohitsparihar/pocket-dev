@@ -720,7 +720,11 @@ fun ChatDetailScreen(
                 }
 
                 items(pending, key = { "pending-${it.key}" }) { prompt ->
-                    PendingMessage(prompt, onCancel = { scope.launch { repository.discardPending(prompt.key) } })
+                    PendingMessage(
+                        prompt,
+                        onCancel = { scope.launch { repository.discardPending(prompt.key) } },
+                        onResend = { act("Could not resend") { repository.resendPending(prompt.key) } },
+                    )
                 }
 
                 if (streaming.isNotBlank()) {
@@ -1240,7 +1244,7 @@ private fun YouMessage(text: String, footer: (@Composable () -> Unit)? = null, d
 }
 
 @Composable
-private fun PendingMessage(prompt: PendingPrompt, onCancel: () -> Unit) {
+private fun PendingMessage(prompt: PendingPrompt, onCancel: () -> Unit, onResend: () -> Unit) {
     YouMessage(
         prompt.text,
         dim = prompt.state != PendingState.Sent,
@@ -1250,14 +1254,33 @@ private fun PendingMessage(prompt: PendingPrompt, onCancel: () -> Unit) {
                 PendingState.Waiting -> "Waiting for connection, sends automatically" to true
                 PendingState.Queued -> "Queued, sends when the agent finishes" to true
                 PendingState.Sent -> "Sent" to false
+                PendingState.Failed -> "Not delivered" to true
             }
+            val failed = prompt.state == PendingState.Failed
             Row(
                 Modifier.padding(top = 4.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Icon(Icons.Outlined.Schedule, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(
+                    if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Schedule,
+                    null,
+                    Modifier.size(14.dp),
+                    tint = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (failed) {
+                    Text(
+                        "Resend",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable(onClick = onResend).padding(4.dp),
+                    )
+                }
                 if (cancellable) {
                     Text(
                         "Cancel",

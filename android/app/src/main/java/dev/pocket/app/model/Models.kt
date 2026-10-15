@@ -158,12 +158,15 @@ data class SessionStatus(
 /** Whether the phone can currently reach the companion. */
 enum class LinkState { Offline, Live, Reconnecting }
 
-enum class PendingState { Sending, Waiting, Queued, Sent }
+@Serializable
+/** Failed: the VM says it never reached the agent, or it waited too long; the user decides whether to resend. */
+enum class PendingState { Sending, Waiting, Queued, Sent, Failed }
 
 /**
  * A prompt the phone has accepted but the companion has not confirmed yet.
  * It is retried with the same idempotency key, so it runs at most once.
  */
+@Serializable
 data class PendingPrompt(
     val key: String,
     val sessionId: String,
@@ -258,9 +261,19 @@ data class GitStatus(
 )
 
 @Serializable
+data class GitCommit(
+    val sha: String,
+    val shortSha: String,
+    val author: String,
+    val at: Long,
+    val subject: String,
+)
+
+@Serializable
 data class BranchInfo(
     val name: String,
     val current: Boolean,
+    val remote: Boolean = false,
 )
 
 @Serializable

@@ -15,6 +15,7 @@ import dev.pocket.app.model.DiffBase
 import dev.pocket.app.model.EditorBuffer
 import dev.pocket.app.model.FileEntry
 import dev.pocket.app.model.GitOperationResult
+import dev.pocket.app.model.GitCommit
 import dev.pocket.app.model.GitStatus
 import dev.pocket.app.model.LinkState
 import dev.pocket.app.model.PendingPrompt
@@ -66,6 +67,7 @@ interface PocketRepository {
     /** Loads the stored history of a chat when it is opened. */
     suspend fun loadHistory(sessionId: String) {}
     suspend fun discardPending(key: String) {}
+    suspend fun resendPending(key: String) {}
 
     /** Slash commands the chat's agent supports on the VM, or null when unknown (offline, demo). */
     suspend fun slashCommands(sessionId: String): List<AgentCommand>? = null
@@ -113,6 +115,7 @@ interface PocketRepository {
     suspend fun gitStatus(projectId: String): GitStatus
     suspend fun gitDiff(projectId: String, path: String, base: DiffBase, commit: String): String
     suspend fun branches(projectId: String): List<BranchInfo>
+    suspend fun gitLog(projectId: String): List<GitCommit> = emptyList()
     suspend fun commit(projectId: String, paths: List<String>, message: String, idempotencyKey: String): GitOperationResult
     suspend fun push(projectId: String, idempotencyKey: String): GitOperationResult
     suspend fun pull(projectId: String, idempotencyKey: String): GitOperationResult

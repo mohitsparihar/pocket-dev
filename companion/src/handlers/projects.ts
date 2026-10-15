@@ -55,7 +55,9 @@ export function registerProjectRoutes(): void {
       }
     }
 
-    const body = parseBody<{ name: string; rootPath: string; devCommand?: string; expectedPorts?: number[] }>(buf);
+    const body = parseBody<{ name: string; rootPath?: string; folder?: string; devCommand?: string; expectedPorts?: number[] }>(buf);
+    // The phone sends `folder` (the name it reads back); accept both.
+    body.rootPath = body.rootPath || body.folder;
 
     if (!body.name || !body.rootPath) {
       throwHttp(400, 'VALIDATION', 'name and rootPath are required');
@@ -71,7 +73,7 @@ export function registerProjectRoutes(): void {
     db.prepare(
       `INSERT INTO projects (id, name, root_path, dev_command, expected_ports, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, body.name, body.rootPath, body.devCommand ?? null, JSON.stringify(body.expectedPorts ?? []), ts, ts);
+    ).run(id, body.name, body.rootPath!, body.devCommand ?? null, JSON.stringify(body.expectedPorts ?? []), ts, ts);
 
     const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as unknown as ProjectRow;
     const result = projectRowToJson(project);

@@ -8,7 +8,8 @@ export type ErrorCode =
   | 'VALIDATION'
   | 'BUSY'
   | 'UNSUPPORTED'
-  | 'IDEMPOTENT_REPLAY';
+  | 'IDEMPOTENT_REPLAY'
+  | 'NOT_DELIVERED';
 
 export interface ApiError {
   error: {

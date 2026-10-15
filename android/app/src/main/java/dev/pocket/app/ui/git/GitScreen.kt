@@ -1,5 +1,13 @@
 package dev.pocket.app.ui.git
 
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.ui.text.font.FontFamily
+import dev.pocket.app.model.GitCommit
+import dev.pocket.app.ui.chats.relativeTime
 import dev.pocket.app.ui.components.rememberSafeScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,13 +71,35 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
     var commitMessage by remember { mutableStateOf("") }
     var result by remember { mutableStateOf<GitOperationResult?>(null) }
     var showBranches by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+    var branchQuery by remember { mutableStateOf("") }
+    val shownBranches = remember(branches, branchQuery) { filterBranches(branches, branchQuery) }
+    var commits by remember { mutableStateOf<List<GitCommit>>(emptyList()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        try {
-            status = repository.gitStatus(projectId)
-            branches = repository.branches(projectId)
-        } finally {
-            loading = false
+    // Each load fails on its own (not a git repo, VM unreachable) and shows a
+    // message; none of them may crash the screen.
+    suspend fun reload() {
+        runCatching { repository.gitStatus(projectId) }
+            .onSuccess { status = it; loadError = null }
+            .onFailure { loadError = it.message ?: "Could not load git status" }
+        runCatching { repository.branches(projectId) }.onSuccess { branches = it }
+        runCatching { repository.gitLog(projectId) }.onSuccess { commits = it }
+    }
+
+    LaunchedEffect(projectId) {
+        reload()
+        loading = false
+    }
+
+    /** Runs a git action; a failure becomes an error banner instead of a stuck screen. */
+    fun runGit(action: suspend () -> GitOperationResult, onDone: () -> Unit = {}) {
+        scope.launch {
+            actionLoading = true
+            result = runCatching { action() }.getOrElse { GitOperationResult(false, it.message ?: "git failed") }
+            actionLoading = false
+            if (result?.ok == true) onDone()
+            reload()
         }
     }
 
@@ -90,7 +120,10 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
                     Text("Git", style = MaterialTheme.typography.titleSmall)
                 }
             }
-            IconButton(onClick = { showBranches = !showBranches }) {
+            IconButton(onClick = { showHistory = !showHistory; if (showHistory) showBranches = false }) {
+                Icon(Icons.Outlined.History, "History", tint = if (showHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+            }
+            IconButton(onClick = { showBranches = !showBranches; if (showBranches) showHistory = false }) {
                 Icon(
                     if (showBranches) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
                     "Branches",
@@ -103,26 +136,103 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Outlined.AccountTree, null, Modifier.size(16.dp))
-                        Text("Branches", style = MaterialTheme.typography.labelMedium)
+                        Text("Branches", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                        Text(
+                            if (branchQuery.isBlank()) "${branches.size}" else "${shownBranches.size} of ${branches.size}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Spacer(Modifier.height(6.dp))
-                    branches.forEach { branch ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            if (branch.current) {
-                                Icon(Icons.Outlined.Check, "Current", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            } else {
-                                Spacer(Modifier.size(16.dp))
+                    OutlinedTextField(
+                        value = branchQuery,
+                        onValueChange = { branchQuery = it },
+                        placeholder = { Text("Search branches") },
+                        leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                        trailingIcon = {
+                            if (branchQuery.isNotEmpty()) {
+                                IconButton(onClick = { branchQuery = "" }) { Icon(Icons.Outlined.Close, "Clear search") }
                             }
-                            Text(branch.name, style = MaterialTheme.typography.bodySmall, color = if (branch.current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    )
+                    if (shownBranches.isEmpty()) {
+                        Text(
+                            if (branches.isEmpty()) "No branches." else "No branch matches \"$branchQuery\".",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        )
+                    }
+                    // Its own scrolling list, capped in height so the rest of the screen stays reachable.
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                        shownBranches.forEachIndexed { index, branch ->
+                            val previous = shownBranches.getOrNull(index - 1)
+                            if (!branch.current && (previous == null || previous.current || previous.remote != branch.remote)) {
+                                item(key = "section-${branch.remote}") {
+                                    Text(
+                                        if (branch.remote) "Remote" else "Local",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                                    )
+                                }
+                            }
+                            item(key = "b-${branch.remote}-${branch.name}") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (branch.current) {
+                                        Icon(Icons.Outlined.Check, "Current", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                    } else {
+                                        Spacer(Modifier.size(16.dp))
+                                    }
+                                    Text(
+                                        branch.name,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                        color = if (branch.current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
             HorizontalDivider()
+        }
+
+        if (showHistory) {
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                Column(Modifier.fillMaxWidth().heightIn(max = 360.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text("Recent commits", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(6.dp))
+                    if (commits.isEmpty()) {
+                        Text("No commits yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    val now = System.currentTimeMillis()
+                    LazyColumn {
+                        items(commits, key = { it.sha }) { commit ->
+                            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                                Text(commit.subject, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                                Text(
+                                    "${commit.shortSha} · ${commit.author} · ${relativeTime(commit.at, now)}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalDivider()
+        }
+
+        loadError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
         }
 
         result?.let { r ->
@@ -192,15 +302,11 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
                 Button(
                     onClick = {
                         val key = UUID.randomUUID().toString()
-                        scope.launch {
-                            actionLoading = true
-                            result = repository.commit(projectId, selected.toList(), commitMessage, key)
-                            actionLoading = false
-                            if (result?.ok == true) {
-                                selected.clear()
-                                commitMessage = ""
-                                status = repository.gitStatus(projectId)
-                            }
+                        val paths = selected.toList()
+                        val message = commitMessage
+                        runGit({ repository.commit(projectId, paths, message, key) }) {
+                            selected.clear()
+                            commitMessage = ""
                         }
                     },
                     enabled = selected.isNotEmpty() && commitMessage.isNotBlank() && !actionLoading,
@@ -214,12 +320,7 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
                 OutlinedButton(
                     onClick = {
                         val key = UUID.randomUUID().toString()
-                        scope.launch {
-                            actionLoading = true
-                            result = repository.pull(projectId, key)
-                            actionLoading = false
-                            status = repository.gitStatus(projectId)
-                        }
+                        runGit({ repository.pull(projectId, key) })
                     },
                     enabled = !actionLoading,
                     modifier = Modifier.weight(1f).height(48.dp),
@@ -227,11 +328,7 @@ fun GitScreen(repository: PocketRepository, projectId: String) {
                 OutlinedButton(
                     onClick = {
                         val key = UUID.randomUUID().toString()
-                        scope.launch {
-                            actionLoading = true
-                            result = repository.push(projectId, key)
-                            actionLoading = false
-                        }
+                        runGit({ repository.push(projectId, key) })
                     },
                     enabled = !actionLoading,
                     modifier = Modifier.weight(1f).height(48.dp),

@@ -401,17 +401,13 @@ export function registerSessionRoutes(): void {
     send(res, 200, sessionRowToJson(row, events, approvals));
   });
 
+  // Prompts are at most once per idempotency key. The key is recorded as
+  // "accepted" before anything reaches the agent, so a retry after a lost
+  // response, or after a crash mid-request, never runs the prompt again.
   register('POST', '/v1/sessions/:id/prompt', async (req, res, params) => {
     verifyToken(req);
     const buf = await readBody(req);
-    const ikey = req.headers['idempotency-key'] as string | undefined;
-    const endpoint = `POST /v1/sessions/${params.id}/prompt`;
-
-    if (ikey) {
-      const hash = bodyHash(buf);
-      const cached = checkIdempotency(ikey, endpoint, hash);
-      if (cached) { send(res, cached.statusCode, cached.body); return; }
-    }
+    const ikey = (req.headers['idempotency-key'] as string | undefined)?.trim() || undefined;
 
     const body = parseBody<{ text: string }>(buf);
     if (!body.text) throwHttp(400, 'VALIDATION', 'text is required');
@@ -419,6 +415,25 @@ export function registerSessionRoutes(): void {
     const db = getDb();
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(params.id) as unknown as SessionRow | undefined;
     if (!session) throwHttp(404, 'NOT_FOUND', 'Session not found');
+
+    if (ikey) {
+      const op = db.prepare('SELECT session_id, text, state FROM prompt_ops WHERE ikey = ?').get(ikey) as
+        | { session_id: string; text: string; state: string }
+        | undefined;
+      if (op) {
+        if (op.session_id !== params.id || op.text !== body.text) {
+          throwHttp(409, 'CONFLICT', 'This idempotency key was already used for a different message');
+        }
+        // Only a prompt known to have reached the agent counts as done. A failed
+        // or interrupted one must not look delivered, or it vanishes from the
+        // phone; the phone offers a resend with a new key instead.
+        if (op.state === 'failed' || op.state === 'interrupted') {
+          throwHttp(409, 'NOT_DELIVERED', 'This message did not reach the agent. Send it again.');
+        }
+        send(res, 200, { ok: true, duplicate: true, state: op.state });
+        return;
+      }
+    }
 
     // Cursor and Codex ignore slash commands headless; expand custom command
     // files here. The chat still shows what the user typed.
@@ -432,24 +447,38 @@ export function registerSessionRoutes(): void {
       review: expansion?.review,
     };
     const workspacePath = session.workspace_path ?? '';
-    if (session.provider === 'agent' || session.provider === 'codex') {
+    const oneShot = session.provider === 'agent' || session.provider === 'codex';
+
+    // Refusals happen before the key is recorded, so the phone can retry later.
+    if (oneShot) {
       if (isSessionRunning(params.id)) throwHttp(409, 'BUSY', 'The agent is still working');
-      startSessionProcess(params.id, session.provider, workspacePath, launch);
     } else {
-      if (!isSessionRunning(params.id)) {
-        startSessionProcess(params.id, session.provider, workspacePath, launch);
-      }
+      if (!isSessionRunning(params.id)) startSessionProcess(params.id, session.provider, workspacePath, launch);
       if (!isSessionRunning(params.id)) throwHttp(409, 'BUSY', 'Session process is not running');
-      sendPrompt(params.id, launch.prompt);
     }
-    emitEvent(params.id, 'prompt', { text: body.text });
+
+    if (ikey) {
+      db.prepare(`INSERT INTO prompt_ops (ikey, session_id, text, state, created_at) VALUES (?, ?, ?, 'accepted', ?)`).run(
+        ikey, params.id, body.text, now()
+      );
+    }
+    emitEvent(params.id, 'prompt', ikey ? { text: body.text, key: ikey } : { text: body.text });
+
+    try {
+      if (oneShot) startSessionProcess(params.id, session.provider, workspacePath, launch);
+      else sendPrompt(params.id, launch.prompt);
+    } catch (err) {
+      if (ikey) db.prepare(`UPDATE prompt_ops SET state = 'failed' WHERE ikey = ?`).run(ikey);
+      const msg = err instanceof Error ? err.message : String(err);
+      emitEvent(params.id, 'error', { text: `The message could not be delivered: ${msg}` });
+      throw err;
+    }
+    if (ikey) db.prepare(`UPDATE prompt_ops SET state = 'dispatched' WHERE ikey = ?`).run(ikey);
+
     if (!session.title) {
       db.prepare('UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?').run(titleFromPrompt(body.text), now(), params.id);
     }
-
-    const result = { ok: true };
-    if (ikey) storeIdempotency(ikey, endpoint, bodyHash(buf), 200, result);
-    send(res, 200, result);
+    send(res, 200, { ok: true });
   });
 
   register('POST', '/v1/sessions/:id/interrupt', async (req, res, params) => {

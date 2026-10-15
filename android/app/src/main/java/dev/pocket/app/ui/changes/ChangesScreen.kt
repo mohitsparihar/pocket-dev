@@ -97,17 +97,38 @@ fun ChangesScreen(
     var commitStr by remember { mutableStateOf("") }
     var diffText by remember { mutableStateOf("") }
     var loadingDiff by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var diffError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        status = repository.gitStatus(projectId)
-        val first = status?.files?.firstOrNull()
-        selectedFile = first
+    // A failed load (not a git repo, VM unreachable) shows a message; it must never crash.
+    LaunchedEffect(projectId) {
+        runCatching { repository.gitStatus(projectId) }
+            .onSuccess {
+                status = it
+                selectedFile = it.files.firstOrNull()
+                error = null
+            }
+            .onFailure { error = it.message ?: "Could not load the changes" }
     }
 
     LaunchedEffect(selectedFile, diffBase, commitStr) {
         val f = selectedFile ?: return@LaunchedEffect
+        // Wait for a ref before diffing against a commit.
+        if (diffBase == DiffBase.Commit && commitStr.isBlank()) {
+            diffText = ""
+            diffError = null
+            return@LaunchedEffect
+        }
         loadingDiff = true
-        diffText = repository.gitDiff(projectId, f.path, diffBase, commitStr)
+        runCatching { repository.gitDiff(projectId, f.path, diffBase, commitStr) }
+            .onSuccess {
+                diffText = it
+                diffError = null
+            }
+            .onFailure {
+                diffText = ""
+                diffError = it.message ?: "Could not load the diff"
+            }
         loadingDiff = false
     }
 
@@ -170,14 +191,19 @@ fun ChangesScreen(
             )
         }
 
-        if (files.isEmpty() && status != null) {
+        if (error != null) {
+            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
+            }
+        } else if (status == null) {
+            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text("Loading changes…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else if (files.isEmpty()) {
             Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                 Text("No changed files.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            return
-        }
-
-        Row(Modifier.fillMaxSize()) {
+        } else Row(Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.weight(0.35f),
             ) {
@@ -193,14 +219,7 @@ fun ChangesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f) else Color.Transparent)
-                            .clickable {
-                                selectedFile = file
-                                scope.launch {
-                                    loadingDiff = true
-                                    diffText = repository.gitDiff(projectId, file.path, diffBase, commitStr)
-                                    loadingDiff = false
-                                }
-                            }
+                            .clickable { selectedFile = file }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -229,6 +248,10 @@ fun ChangesScreen(
                 if (selectedFile == null) {
                     Spacer(Modifier.height(32.dp))
                     Text("Select a file to view its diff.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp))
+                } else if (diffError != null) {
+                    Text(diffError.orEmpty(), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
+                } else if (diffBase == DiffBase.Commit && commitStr.isBlank()) {
+                    Text("Enter a commit hash, branch or tag above.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp))
                 } else if (loadingDiff) {
                     Text("Loading diff…", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp))
                 } else if (diffText.isBlank()) {

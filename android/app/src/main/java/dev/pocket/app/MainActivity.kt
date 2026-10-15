@@ -19,6 +19,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         openSession.value = intent?.getStringExtra(EXTRA_OPEN_SESSION)
         val repository = RepositoryFactory.create(applicationContext)
+        PocketConnectionService.resumeIfConnected(applicationContext)
         setContent {
             PocketTheme {
                 PocketApp(
