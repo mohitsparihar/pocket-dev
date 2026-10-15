@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.PocketDev" parent="android:Theme.Material.NoActionBar" />
+</resources>
