@@ -51,6 +51,9 @@ class GoogleAuth(context: Context) {
     fun email(): String? = account.value
 
     suspend fun signIn(activity: Activity): String {
+        check(CLIENT_ID.isNotBlank()) {
+            "Google sign-in isn't set up in this build. Add pocket.googleClientId and pocket.googleClientSecret to android/local.properties and rebuild."
+        }
         val port = 40_000 + SecureRandom().nextInt(20_000)
         val redirect = "http://localhost:$port/"
         val verifier = ByteArray(32).also { SecureRandom().nextBytes(it) }.toUrlBase64()
@@ -227,8 +230,9 @@ class GoogleAuth(context: Context) {
     private fun ByteArray.toUrlBase64() = Base64.getUrlEncoder().withoutPadding().encodeToString(this)
 
     companion object {
-        private const val CLIENT_ID = "REDACTED.apps.googleusercontent.com"
-        private const val CLIENT_SECRET = "REDACTED"
+        // From android/local.properties (pocket.googleClientId / pocket.googleClientSecret); see README.
+        private val CLIENT_ID = dev.pocket.app.BuildConfig.GOOGLE_CLIENT_ID
+        private val CLIENT_SECRET = dev.pocket.app.BuildConfig.GOOGLE_CLIENT_SECRET
         private const val SCOPE = "openid email https://www.googleapis.com/auth/cloud-platform"
         private const val KEY_REFRESH = "refresh_token"
         private const val KEY_EMAIL = "email"

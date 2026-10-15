@@ -27,3 +27,14 @@ Run these from the project root. They need Node 22.5+, and the phone commands ne
 | `npm run clean` | Deletes build output |
 
 With more than one phone or emulator connected, pick one: `ANDROID_SERIAL=<id> npm run phone` (ids come from `npm run devices`). The scripts find `adb` through `ANDROID_HOME`, `android/local.properties`, or the default SDK location.
+
+## Local credentials
+
+Nothing secret is committed. Google Cloud sign-in needs an OAuth client, read at build time from `android/local.properties` (ignored by git) or from environment variables:
+
+```
+pocket.googleClientId=<client id>.apps.googleusercontent.com
+pocket.googleClientSecret=<client secret>
+```
+
+(`POCKET_GOOGLE_CLIENT_ID` and `POCKET_GOOGLE_CLIENT_SECRET` work too.) Without them the app builds, and only Google sign-in says it isn't set up. SSH keys, pairing codes and tokens are entered in the app and stay on the phone.

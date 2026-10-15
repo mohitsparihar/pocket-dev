@@ -1,9 +1,20 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
 }
+
+// Credentials stay out of git: they are read from android/local.properties
+// (ignored by git) or environment variables, and compiled into BuildConfig.
+val localProps = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+fun secret(name: String, env: String): String =
+    (localProps.getProperty(name) ?: System.getenv(env) ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
 
 android {
     namespace = "dev.pocket.app"
@@ -13,6 +24,8 @@ android {
         applicationId = "dev.pocket.app"
         minSdk = 26
         targetSdk = 35
+        buildConfigField("String", "GOOGLE_CLIENT_ID", "\"${secret("pocket.googleClientId", "POCKET_GOOGLE_CLIENT_ID")}\"")
+        buildConfigField("String", "GOOGLE_CLIENT_SECRET", "\"${secret("pocket.googleClientSecret", "POCKET_GOOGLE_CLIENT_SECRET")}\"")
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -36,6 +49,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
